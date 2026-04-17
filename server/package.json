@@ -1,0 +1,28 @@
+{
+  "name": "hot-step-cpp-server",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.5.0",
+    "express": "^5.1.0",
+    "uuid": "^11.1.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.2",
+    "@types/node": "^22.14.0",
+    "@types/uuid": "^10.0.0",
+    "tsx": "^4.19.3",
+    "typescript": "~5.8.2"
+  }
+}

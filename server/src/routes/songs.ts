@@ -1,0 +1,159 @@
+// songs.ts — Song CRUD routes + audio file serving
+//
+// Songs are stored in SQLite. Audio files are saved to data/audio/.
+
+import { Router } from 'express';
+import fs from 'fs';
+import path from 'path';
+import { getDb } from '../db/database.js';
+import { config } from '../config.js';
+import { getUserId } from './auth.js';
+
+const router = Router();
+
+// GET /api/songs — list user's songs
+router.get('/', (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
+
+  const songs = getDb()
+    .prepare('SELECT * FROM songs WHERE user_id = ? ORDER BY created_at DESC')
+    .all(userId);
+
+  // Parse tags JSON string
+  const parsed = songs.map((s: any) => ({
+    ...s,
+    tags: JSON.parse(s.tags || '[]'),
+    is_public: !!s.is_public,
+  }));
+
+  res.json({ songs: parsed });
+});
+
+// GET /api/songs/:id — get single song
+router.get('/:id', (req, res) => {
+  const song = getDb()
+    .prepare('SELECT * FROM songs WHERE id = ?')
+    .get(req.params.id) as any;
+
+  if (!song) { res.status(404).json({ error: 'Song not found' }); return; }
+
+  res.json({
+    song: {
+      ...song,
+      tags: JSON.parse(song.tags || '[]'),
+      is_public: !!song.is_public,
+    },
+  });
+});
+
+// POST /api/songs — create a new song
+router.post('/', (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
+
+  const {
+    id, title, lyrics, style, caption, audio_url, cover_url,
+    duration, bpm, key_scale, time_signature, tags, dit_model,
+    generation_params,
+  } = req.body;
+
+  const songId = id || crypto.randomUUID();
+  const tagsJson = JSON.stringify(tags || []);
+  const genParamsJson = typeof generation_params === 'string'
+    ? generation_params
+    : JSON.stringify(generation_params || {});
+
+  getDb().prepare(`
+    INSERT INTO songs (id, user_id, title, lyrics, style, caption, audio_url, cover_url,
+                       duration, bpm, key_scale, time_signature, tags, dit_model, generation_params)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    songId, userId, title || 'Untitled', lyrics || '', style || '',
+    caption || '', audio_url || '', cover_url || '',
+    duration || 0, bpm || 0, key_scale || '', time_signature || '',
+    tagsJson, dit_model || '', genParamsJson,
+  );
+
+  const song = getDb().prepare('SELECT * FROM songs WHERE id = ?').get(songId) as any;
+  res.json({
+    song: { ...song, tags: JSON.parse(song.tags || '[]'), is_public: !!song.is_public },
+  });
+});
+
+// PATCH /api/songs/:id — update song
+router.patch('/:id', (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
+
+  const song = getDb().prepare('SELECT * FROM songs WHERE id = ? AND user_id = ?')
+    .get(req.params.id, userId) as any;
+  if (!song) { res.status(404).json({ error: 'Song not found' }); return; }
+
+  const updates = req.body;
+  const allowed = ['title', 'lyrics', 'style', 'caption', 'cover_url', 'is_public',
+    'bpm', 'key_scale', 'time_signature', 'dit_model'];
+
+  for (const key of allowed) {
+    if (updates[key] !== undefined) {
+      const value = key === 'is_public' ? (updates[key] ? 1 : 0) : updates[key];
+      getDb().prepare(`UPDATE songs SET ${key} = ? WHERE id = ?`).run(value, req.params.id);
+    }
+  }
+
+  if (updates.tags) {
+    getDb().prepare('UPDATE songs SET tags = ? WHERE id = ?')
+      .run(JSON.stringify(updates.tags), req.params.id);
+  }
+
+  const updated = getDb().prepare('SELECT * FROM songs WHERE id = ?').get(req.params.id) as any;
+  res.json({
+    song: { ...updated, tags: JSON.parse(updated.tags || '[]'), is_public: !!updated.is_public },
+  });
+});
+
+// DELETE /api/songs/:id — delete song + audio file
+router.delete('/:id', (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
+
+  const song = getDb().prepare('SELECT * FROM songs WHERE id = ? AND user_id = ?')
+    .get(req.params.id, userId) as any;
+  if (!song) { res.status(404).json({ error: 'Song not found' }); return; }
+
+  // Delete audio file if it exists
+  if (song.audio_url) {
+    const filename = path.basename(song.audio_url);
+    const filepath = path.join(config.data.audioDir, filename);
+    if (fs.existsSync(filepath)) {
+      fs.unlinkSync(filepath);
+    }
+  }
+
+  getDb().prepare('DELETE FROM songs WHERE id = ?').run(req.params.id);
+  res.json({ success: true });
+});
+
+// DELETE /api/songs — delete all user's songs
+router.delete('/', (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
+
+  const songs = getDb().prepare('SELECT audio_url FROM songs WHERE user_id = ?').all(userId) as any[];
+
+  // Delete audio files
+  for (const song of songs) {
+    if (song.audio_url) {
+      const filename = path.basename(song.audio_url);
+      const filepath = path.join(config.data.audioDir, filename);
+      if (fs.existsSync(filepath)) {
+        fs.unlinkSync(filepath);
+      }
+    }
+  }
+
+  const result = getDb().prepare('DELETE FROM songs WHERE user_id = ?').run(userId);
+  res.json({ success: true, deletedCount: result.changes });
+});
+
+export default router;

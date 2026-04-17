@@ -1,0 +1,232 @@
+// aceClient.ts — HTTP client for acestep.cpp's ace-server API
+//
+// Wraps all ace-server endpoints with typed methods.
+// Used by the generation orchestrator and model routes.
+
+import { config } from '../config.js';
+
+const BASE = config.aceServer.url;
+
+/** Props response from GET /props */
+export interface AceProps {
+  models: {
+    lm: string[];
+    embedding: string[];
+    dit: string[];
+    vae: string[];
+  };
+  adapters: string[];
+  cli: {
+    max_batch: number;
+    mp3_bitrate: number;
+  };
+  default: Record<string, unknown>;
+}
+
+/** AceRequest — matches acestep.cpp's request JSON format */
+export interface AceRequest {
+  caption: string;
+  lyrics?: string;
+  bpm?: number;
+  duration?: number;
+  keyscale?: string;
+  timesignature?: string;
+  vocal_language?: string;
+  seed?: number;
+  lm_batch_size?: number;
+  synth_batch_size?: number;
+  lm_temperature?: number;
+  lm_cfg_scale?: number;
+  lm_top_p?: number;
+  lm_top_k?: number;
+  lm_negative_prompt?: string;
+  use_cot_caption?: boolean;
+  audio_codes?: string;
+  inference_steps?: number;
+  guidance_scale?: number;
+  shift?: number;
+  audio_cover_strength?: number;
+  cover_noise_strength?: number;
+  repainting_start?: number;
+  repainting_end?: number;
+  task_type?: string;
+  track?: string;
+  infer_method?: string;
+  peak_clip?: number;
+  // Server routing fields
+  synth_model?: string;
+  lm_model?: string;
+  adapter?: string;
+  adapter_scale?: number;
+}
+
+/** Job status from ace-server */
+export interface AceJobStatus {
+  status: 'running' | 'done' | 'failed' | 'cancelled';
+}
+
+async function aceGet(path: string): Promise<Response> {
+  const res = await fetch(`${BASE}${path}`);
+  if (!res.ok) {
+    const body = await res.text().catch(() => 'Unknown error');
+    throw new Error(`ace-server ${path} failed (${res.status}): ${body}`);
+  }
+  return res;
+}
+
+async function acePost(path: string, body?: unknown, contentType = 'application/json'): Promise<Response> {
+  const headers: Record<string, string> = {};
+  let reqBody: string | undefined;
+
+  if (body !== undefined) {
+    headers['Content-Type'] = contentType;
+    reqBody = typeof body === 'string' ? body : JSON.stringify(body);
+  }
+
+  const res = await fetch(`${BASE}${path}`, {
+    method: 'POST',
+    headers,
+    body: reqBody,
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => 'Unknown error');
+    throw new Error(`ace-server POST ${path} failed (${res.status}): ${errBody}`);
+  }
+  return res;
+}
+
+export const aceClient = {
+  /** GET /health — check if ace-server is alive */
+  async health(): Promise<{ status: string }> {
+    const res = await aceGet('/health');
+    return res.json();
+  },
+
+  /** GET /props — available models, config, defaults */
+  async props(): Promise<AceProps> {
+    const res = await aceGet('/props');
+    return res.json();
+  },
+
+  /** POST /lm — submit LM generation job, returns job ID */
+  async submitLm(request: AceRequest, mode?: 'inspire' | 'format'): Promise<string> {
+    const path = mode ? `/lm?mode=${mode}` : '/lm';
+    const res = await acePost(path, request);
+    const data = await res.json() as { id: string };
+    return data.id;
+  },
+
+  /** POST /synth — submit synth job, returns job ID */
+  async submitSynth(request: AceRequest | AceRequest[], wav = false): Promise<string> {
+    const path = wav ? '/synth?wav=1' : '/synth';
+    const res = await acePost(path, request);
+    const data = await res.json() as { id: string };
+    return data.id;
+  },
+
+  /**
+   * POST /synth with multipart — for cover/repaint modes with source audio
+   * Sends request JSON + audio file(s) as multipart/form-data
+   */
+  async submitSynthMultipart(
+    request: AceRequest | AceRequest[],
+    srcAudio?: Buffer,
+    refAudio?: Buffer,
+    wav = false,
+  ): Promise<string> {
+    const path = wav ? '/synth?wav=1' : '/synth';
+    const boundary = '----HotStepBoundary' + Date.now();
+
+    const parts: Buffer[] = [];
+    const addPart = (name: string, content: Buffer, contentType: string, filename?: string) => {
+      let header = `--${boundary}\r\nContent-Disposition: form-data; name="${name}"`;
+      if (filename) header += `; filename="${filename}"`;
+      header += `\r\nContent-Type: ${contentType}\r\n\r\n`;
+      parts.push(Buffer.from(header));
+      parts.push(content);
+      parts.push(Buffer.from('\r\n'));
+    };
+
+    // Request JSON part
+    const reqJson = JSON.stringify(Array.isArray(request) ? request : [request]);
+    addPart('request', Buffer.from(reqJson), 'application/json');
+
+    // Source audio part
+    if (srcAudio) {
+      addPart('audio', srcAudio, 'audio/wav', 'source.wav');
+    }
+
+    // Reference audio part
+    if (refAudio) {
+      addPart('ref_audio', refAudio, 'audio/wav', 'reference.wav');
+    }
+
+    parts.push(Buffer.from(`--${boundary}--\r\n`));
+    const body = Buffer.concat(parts);
+
+    const res = await fetch(`${BASE}${path}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+      },
+      body,
+    });
+
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => 'Unknown error');
+      throw new Error(`ace-server POST ${path} multipart failed (${res.status}): ${errBody}`);
+    }
+
+    const data = await res.json() as { id: string };
+    return data.id;
+  },
+
+  /** POST /understand — submit understand job, returns job ID */
+  async submitUnderstand(audioBuffer: Buffer): Promise<string> {
+    const boundary = '----HotStepBoundary' + Date.now();
+    const header = `--${boundary}\r\nContent-Disposition: form-data; name="audio"; filename="input.wav"\r\nContent-Type: audio/wav\r\n\r\n`;
+    const footer = `\r\n--${boundary}--\r\n`;
+    const body = Buffer.concat([Buffer.from(header), audioBuffer, Buffer.from(footer)]);
+
+    const res = await fetch(`${BASE}/understand`, {
+      method: 'POST',
+      headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+      body,
+    });
+
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => 'Unknown error');
+      throw new Error(`ace-server POST /understand failed (${res.status}): ${errBody}`);
+    }
+
+    const data = await res.json() as { id: string };
+    return data.id;
+  },
+
+  /** GET /job?id=N — poll job status */
+  async pollJob(jobId: string): Promise<AceJobStatus> {
+    const res = await aceGet(`/job?id=${jobId}`);
+    return res.json();
+  },
+
+  /** GET /job?id=N&result=1 — fetch completed job result */
+  async getJobResult(jobId: string): Promise<Response> {
+    return fetch(`${BASE}/job?id=${jobId}&result=1`);
+  },
+
+  /** POST /job?id=N&cancel=1 — cancel a running job */
+  async cancelJob(jobId: string): Promise<void> {
+    await fetch(`${BASE}/job?id=${jobId}&cancel=1`, { method: 'POST' });
+  },
+
+  /** Check if ace-server is reachable */
+  async isReachable(): Promise<boolean> {
+    try {
+      await this.health();
+      return true;
+    } catch {
+      return false;
+    }
+  },
+};

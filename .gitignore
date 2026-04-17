@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Build output
+ui/dist/
+server/dist/
+
+# Data (local, not committed)
+server/data/
+*.db
+
+# Environment
+.env
+
+# Engine build artifacts
+engine/acestep.cpp/
+engine/build/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Agents
+.agents/
+.agent/
+.claude/
+.gemini/
